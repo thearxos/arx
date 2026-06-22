@@ -110,6 +110,10 @@ op_update(){
 
 op_install(){
   [ $# -eq 0 ] && { _title "install"; _no "no package specified"; return 1; }
+  # ARXOS arsenal aliases: weaponCat-<x> maps to its underlying tool group
+  local _t=() _a; for _a in "$@"; do
+    [[ "$_a" == weaponCat-* ]] && _t+=("blackarch-${_a#weaponCat-}") || _t+=("$_a"); done
+  set -- "${_t[@]}"
   _title "install" "$*"
   if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then _no "$(_diagnose)"; return 1; fi
   local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
