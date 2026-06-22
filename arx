@@ -217,6 +217,30 @@ _run(){ # label cmd...
   return $rc
 }
 
+# AUR malware safety: fetch each PKGBUILD and flag high-risk patterns before building.
+_aur_safety(){ # pkg...
+  command -v curl >/dev/null 2>&1 || return 0
+  local pkg pb hits flagged=0
+  for pkg in "$@"; do
+    [[ "$pkg" == -* ]] && continue
+    pb=$(curl -fsSL --max-time 12 "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$pkg" 2>/dev/null)
+    [ -z "$pb" ] && continue
+    hits=$(printf '%s\n' "$pb" | grep -niE \
+      'curl[^|]*\|[[:space:]]*(ba)?sh|wget[^|]*\|[[:space:]]*(ba)?sh|base64[[:space:]]+-d.*\|[[:space:]]*(ba)?sh|/dev/tcp/|[^a-z](nc|ncat)[[:space:]][^|]*-e[[:space:]]|[^a-z]sudo[[:space:]]|systemctl[[:space:]]+enable|/etc/cron|[^a-z]useradd[[:space:]]|chmod[[:space:]]+777|>[[:space:]]*/etc/' 2>/dev/null)
+    if [ -n "$hits" ]; then
+      _no "AUR safety flagged '$pkg' (PKGBUILD):"
+      printf '%s\n' "$hits" | head -5 | sed -E 's/^/      /'
+      flagged=$((flagged+1))
+    fi
+  done
+  if [ "$flagged" -gt 0 ]; then
+    printf "\n  ${RD}!! these patterns can indicate malware — review the PKGBUILD before building.${RS}\n\n"
+    [ -n "$ASSUME_YES" ] && { _no "refusing to auto-build a flagged AUR package (review it, then run without -y)"; return 1; }
+    printf "  ${BD}build anyway?${RS} ${DM}[y/N]${RS} "; local a; read -r a; [[ "$a" =~ ^[Yy]$ ]] || { _dim "cancelled"; printf "\n"; return 1; }
+  fi
+  return 0
+}
+
 # Run a command silently with a phase-aware spinner derived from its log.
 # During the download phase it surfaces the total size + elapsed time, and
 # records size/time/speed into ARX_DLSIZE / ARX_DLTIME / ARX_SPEED for the summary.
@@ -297,6 +321,7 @@ op_install(){
   if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then
     if command -v yay >/dev/null 2>&1 && grep -qi 'target not found' "$LOG"; then
       _dim "not in the repositories - building from the AUR"; printf "\n"
+      _aur_safety "$@" || return 1
       _auth; _confirm || return 0
       _run "building from AUR" yay -S --noconfirm "$@"; local rc=$?
       [ $rc -eq 0 ] && _ok "installed from AUR: $*" || _no "$(_diagnose)"; return $rc
@@ -404,6 +429,7 @@ op_aur(){
   [ $# -eq 0 ] && { _title "AUR"; _no "no package specified"; return 1; }
   command -v yay >/dev/null 2>&1 || { _title "AUR"; _no "yay is not installed"; return 1; }
   _title "AUR install" "$*"
+  _aur_safety "$@" || return 1
   _run "building" yay -S --noconfirm "$@"
   local rc=$?
   [ $rc -eq 0 ] && _ok "installed from AUR: $*" || _no "$(_diagnose)"
