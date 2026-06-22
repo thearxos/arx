@@ -28,6 +28,23 @@ _ok(){  printf "  ${GR}>>${RS} %s\n\n" "$1"; }
 _no(){  printf "  ${RD}xx${RS} %s\n\n" "$1"; }
 _dim(){ printf "  ${DM}%s${RS}\n" "$1"; }
 
+# Average download speed from a "123.4 MiB" size + elapsed seconds.
+_speed(){
+  local sz="$1" t="$2" num unit
+  [ -z "$sz" ] && return; [ "${t:-0}" -le 0 ] && return
+  num=$(printf '%s' "$sz" | grep -oE '[0-9.]+'); unit=$(printf '%s' "$sz" | grep -oE '[KMG]iB')
+  awk -v n="$num" -v u="$unit" -v t="$t" 'BEGIN{m=(u=="GiB")?n*1024:(u=="KiB")?n/1024:n; if(t>0)printf "%.1f MiB/s", m/t}'
+}
+
+# Clean one-line summary: packages · size · speed · time.
+_summary(){ # headline  n
+  local parts="${2} package(s)"
+  [ -n "$ARX_DLSIZE" ] && parts="$parts · $ARX_DLSIZE"
+  [ -n "$ARX_SPEED"  ] && parts="$parts · $ARX_SPEED"
+  [ "${ARX_DLTIME:-0}" -gt 0 ] && parts="$parts · ${ARX_DLTIME}s"
+  printf "  ${GR}>>${RS} %s\n     ${DM}%s${RS}\n\n" "$1" "$parts"
+}
+
 # Turn raw pacman/yay log noise into one clean error line.
 _diagnose(){
   if   grep -qiE 'Resolving timed out|Could not resolve host|name resolution|No address record|failed retrieving file' "$LOG"; then
@@ -55,17 +72,25 @@ _diagnose(){
 }
 
 # Run a command silently with a phase-aware spinner derived from its log.
+# During the download phase it surfaces the total size + elapsed time, and
+# records size/time/speed into ARX_DLSIZE / ARX_DLTIME / ARX_SPEED for the summary.
 _quiet(){ # default_label cmd...
   local label="$1"; shift
-  ( "$@" >"$LOG" 2>&1 ) & local pid=$! i=0 ph
+  ARX_DLSIZE=""; ARX_DLTIME=0; ARX_SPEED=""
+  ( "$@" >"$LOG" 2>&1 ) & local pid=$! i=0 ph sz t_dl0=0 t_dl1=0
   printf '\033[?25l'
   while kill -0 "$pid" 2>/dev/null; do
     ph="$label"
-    if   grep -q 'Running .*transaction hooks' "$LOG" 2>/dev/null; then ph="finalizing"
+    if   grep -q 'Running .*transaction hooks' "$LOG" 2>/dev/null; then ph="finalizing"; { [ "$t_dl0" -gt 0 ] && [ "$t_dl1" -eq 0 ]; } && t_dl1=$(date +%s)
     elif grep -qE '\([0-9]+/[0-9]+\) (installing|upgrading|reinstalling|removing)' "$LOG" 2>/dev/null; then
          ph="applying $(grep -oE '\([0-9]+/[0-9]+\) (installing|upgrading|reinstalling|removing)' "$LOG" | tail -1 | grep -oE '[0-9]+/[0-9]+')"
-    elif grep -qiE 'checking (keys|package integrity)|loading package files' "$LOG" 2>/dev/null; then ph="verifying"
-    elif grep -qiE 'Retrieving packages|downloading'   "$LOG" 2>/dev/null; then ph="downloading"
+         { [ "$t_dl0" -gt 0 ] && [ "$t_dl1" -eq 0 ]; } && t_dl1=$(date +%s)
+    elif grep -qiE 'checking (keys|package integrity)|loading package files' "$LOG" 2>/dev/null; then ph="verifying"; { [ "$t_dl0" -gt 0 ] && [ "$t_dl1" -eq 0 ]; } && t_dl1=$(date +%s)
+    elif grep -qiE 'Retrieving packages|downloading'   "$LOG" 2>/dev/null; then
+         [ "$t_dl0" -eq 0 ] && t_dl0=$(date +%s)
+         sz=$(grep -oiE 'Total Download Size:[[:space:]]*[0-9.]+ [KMG]iB' "$LOG" | tail -1 | grep -oiE '[0-9.]+ [KMG]iB')
+         [ -n "$sz" ] && ARX_DLSIZE="$sz"
+         ph="downloading${ARX_DLSIZE:+ · $ARX_DLSIZE} · $(( $(date +%s) - t_dl0 ))s"
     elif grep -qiE 'system upgrade|resolving dependencies|looking for conflicting' "$LOG" 2>/dev/null; then ph="resolving"
     elif grep -qiE 'Synchronizing package databases'   "$LOG" 2>/dev/null; then ph="synchronizing"
     fi
@@ -73,6 +98,10 @@ _quiet(){ # default_label cmd...
     sleep 0.1
   done
   wait "$pid"; local rc=$?
+  if [ "$t_dl0" -gt 0 ]; then
+    [ "$t_dl1" -eq 0 ] && t_dl1=$(date +%s); ARX_DLTIME=$((t_dl1 - t_dl0))
+    ARX_SPEED=$(_speed "$ARX_DLSIZE" "$ARX_DLTIME")
+  fi
   printf '\r\033[K\033[?25h'
   return $rc
 }
@@ -104,7 +133,10 @@ op_update(){
   _confirm || return 0
   _quiet "upgrading" sudo pacman -Syu --noconfirm
   local rc=$?
-  [ $rc -eq 0 ] && _ok "system upgraded${list:+ · $n package(s)}" || _no "$(_diagnose)"
+  if [ $rc -eq 0 ]; then
+    [ "${n:-0}" -eq 0 ] && n=$(grep -cE '^\([0-9]+/[0-9]+\) upgrading' "$LOG" 2>/dev/null)
+    _summary "system upgraded" "${n:-0}"
+  else _no "$(_diagnose)"; fi
   return $rc
 }
 
@@ -121,7 +153,7 @@ op_install(){
   _auth; _confirm || return 0
   _quiet "installing" sudo pacman -S --noconfirm "$@"
   local rc=$?
-  [ $rc -eq 0 ] && _ok "installed: $*" || _no "$(_diagnose)"
+  [ $rc -eq 0 ] && _summary "installed" "${n:-0}" || _no "$(_diagnose)"
   return $rc
 }
 
@@ -134,7 +166,7 @@ op_remove(){
   _auth; _confirm || return 0
   _quiet "removing" sudo pacman -Rns --noconfirm "$@"
   local rc=$?
-  [ $rc -eq 0 ] && _ok "removed: $*" || _no "$(_diagnose)"
+  [ $rc -eq 0 ] && _summary "removed" "${n:-0}" || _no "$(_diagnose)"
   return $rc
 }
 
@@ -194,16 +226,107 @@ op_aur(){
   [ $rc -eq 0 ] && _ok "installed from AUR: $*" || _no "$(_diagnose)"
 }
 
+# Keyring names present on this system (archlinux + blackarch + cachyos).
+_keyrings(){ # echoes "populate-names|keyring-packages"
+  local pop="archlinux" pkgs="archlinux-keyring"
+  pacman -Qq blackarch-keyring >/dev/null 2>&1 && { pop="$pop blackarch"; pkgs="$pkgs blackarch-keyring"; }
+  pacman -Qq cachyos-keyring   >/dev/null 2>&1 && { pop="$pop cachyos";   pkgs="$pkgs cachyos-keyring"; }
+  printf '%s|%s' "$pop" "$pkgs"
+}
+
+op_mirrors(){
+  _title "mirror refresh"
+  _auth
+  if ! command -v reflector >/dev/null 2>&1; then
+    _quiet "installing reflector" sudo pacman -S --noconfirm reflector || { _no "could not install reflector"; return 1; }
+  fi
+  _quiet "ranking fastest mirrors" sudo bash -c 'reflector --latest 20 --sort rate --protocol https,http --save /etc/pacman.d/mirrorlist'
+  [ $? -ne 0 ] && { _no "$(_diagnose)"; return 1; }
+  _quiet "refreshing databases" sudo pacman -Syy
+  [ $? -eq 0 ] && _ok "mirrors ranked + databases refreshed" || _no "$(_diagnose)"
+}
+
+op_keys(){
+  _title "keyring repair"
+  _auth
+  local kr; kr=$(_keyrings); local pop="${kr%|*}" pkgs="${kr#*|}"
+  _quiet "initialising keyring" sudo pacman-key --init
+  _quiet "populating keys"      sudo pacman-key --populate $pop
+  _quiet "updating keyrings"    sudo pacman -Sy --noconfirm $pkgs
+  [ $? -eq 0 ] && _ok "keyring repaired - signatures should validate now" || _no "$(_diagnose)"
+}
+
+op_fix(){
+  _title "repair"
+  _auth
+  if [ -f /var/lib/pacman/db.lck ] && ! pgrep -x pacman >/dev/null 2>&1; then
+    sudo rm -f /var/lib/pacman/db.lck && _ok "removed stale database lock"
+  fi
+  local kr; kr=$(_keyrings); local pop="${kr%|*}" pkgs="${kr#*|}"
+  _quiet "repairing keyring" sudo pacman-key --init
+  _quiet "populating keys"   sudo pacman-key --populate $pop
+  command -v reflector >/dev/null 2>&1 && \
+    _quiet "ranking mirrors" sudo bash -c 'reflector --latest 20 --sort rate --protocol https,http --save /etc/pacman.d/mirrorlist'
+  _quiet "force-refreshing databases" sudo pacman -Syy --noconfirm $pkgs
+  [ $? -eq 0 ] && _ok "repair complete - lock, keyring, mirrors + databases" || _no "$(_diagnose)"
+}
+
+op_downgrade(){
+  [ $# -eq 0 ] && { _title "downgrade"; _no "no package specified"; return 1; }
+  _title "downgrade" "$*"; _auth
+  if command -v downgrade >/dev/null 2>&1; then sudo downgrade "$@"; return $?; fi
+  local p="$1" f
+  f=$(ls -t /var/cache/pacman/pkg/"$p"-[0-9]*.pkg.tar.* 2>/dev/null | sed -n '2p')
+  [ -z "$f" ] && f=$(ls -t /var/cache/pacman/pkg/"$p"-[0-9]*.pkg.tar.* 2>/dev/null | head -1)
+  [ -z "$f" ] && { _no "no cached version of $p found (install 'downgrade' for full support)"; return 1; }
+  _dim "rolling back to $(basename "$f")"
+  _quiet "downgrading" sudo pacman -U --noconfirm "$f"
+  [ $? -eq 0 ] && _ok "downgraded: $p" || _no "$(_diagnose)"
+}
+
+op_list(){
+  _title "installed packages" "${1:-}"
+  pacman -Qe 2>/dev/null | awk -v C="$CB" -v D="$DM" -v R="$RS" -v f="${1:-}" \
+    'f=="" || index($1,f){printf "  " C "%s" R "  " D "%s" R "\n",$1,$2}'
+  printf "\n  ${DM}%s explicitly-installed package(s)${RS}\n\n" "$(pacman -Qeq 2>/dev/null | wc -l)"
+}
+
+op_owns(){
+  [ $# -eq 0 ] && { _title "owns"; _no "no file specified"; return 1; }
+  _title "owns" "$*"
+  pacman -Qo "$@" 2>&1 | sed 's/^/  /'; printf "\n"
+}
+
+op_files(){
+  [ $# -eq 0 ] && { _title "files"; _no "no package specified"; return 1; }
+  _title "files" "$*"
+  if ! pacman -Fl "$@" 2>/dev/null | awk '{print "  "$2}' | grep -q .; then
+    _auth; _quiet "syncing file database" sudo pacman -Fy
+    pacman -Fl "$@" 2>/dev/null | awk '{print "  "$2}'
+  fi
+  printf "\n"
+}
+
 op_help(){
   printf "\n  ${GB}arx${RS} ${DM}- ARXOS package manager${RS}\n\n"
-  printf "  ${C}%-20s${RS}%s\n" "arx update"        "full system upgrade"
-  printf "  ${C}%-20s${RS}%s\n" "arx install <pkg>" "install package(s)"
-  printf "  ${C}%-20s${RS}%s\n" "arx remove <pkg>"  "remove package(s) + deps"
-  printf "  ${C}%-20s${RS}%s\n" "arx search <term>" "search repositories"
-  printf "  ${C}%-20s${RS}%s\n" "arx info <pkg>"    "package details"
-  printf "  ${C}%-20s${RS}%s\n" "arx clean"         "trim the package cache"
-  printf "  ${C}%-20s${RS}%s\n" "arx orphans"       "remove orphaned deps"
-  printf "  ${C}%-20s${RS}%s\n" "arx aur <pkg>"     "install from the AUR"
+  printf "  ${DM}packages${RS}\n"
+  printf "  ${C}%-22s${RS}%s\n" "update"          "full system upgrade"
+  printf "  ${C}%-22s${RS}%s\n" "install <pkg>"   "install package(s)"
+  printf "  ${C}%-22s${RS}%s\n" "remove <pkg>"    "remove package(s) + deps"
+  printf "  ${C}%-22s${RS}%s\n" "downgrade <pkg>" "roll a package back"
+  printf "  ${C}%-22s${RS}%s\n" "aur <pkg>"       "install from the AUR"
+  printf "\n  ${DM}query${RS}\n"
+  printf "  ${C}%-22s${RS}%s\n" "search <term>"   "search repositories"
+  printf "  ${C}%-22s${RS}%s\n" "info <pkg>"      "package details"
+  printf "  ${C}%-22s${RS}%s\n" "list [filter]"   "installed packages"
+  printf "  ${C}%-22s${RS}%s\n" "owns <file>"     "which package owns a file"
+  printf "  ${C}%-22s${RS}%s\n" "files <pkg>"     "list a package's files"
+  printf "\n  ${DM}maintenance${RS}\n"
+  printf "  ${C}%-22s${RS}%s\n" "mirrors"         "rank the fastest mirrors"
+  printf "  ${C}%-22s${RS}%s\n" "keys"            "repair keyring / signatures"
+  printf "  ${C}%-22s${RS}%s\n" "fix"             "repair lock, keys, mirrors, db"
+  printf "  ${C}%-22s${RS}%s\n" "clean"           "trim the package cache"
+  printf "  ${C}%-22s${RS}%s\n" "orphans"         "remove orphaned deps"
   printf "\n  ${DM}-y/--yes assume yes  ·  arx <pkg> installs directly${RS}\n\n"
 }
 
@@ -227,6 +350,13 @@ case "$verb" in
   cl|clean|cc)                  op_clean ;;
   orphans|autoremove|sweep)     op_orphans ;;
   aur)                          op_aur "$@" ;;
+  mirrors|mirror|rank)          op_mirrors ;;
+  keys|keyring|key)             op_keys ;;
+  fix|repair|doctor)            op_fix ;;
+  downgrade|dg|roll)            op_downgrade "$@" ;;
+  list|ls|installed)            op_list "$@" ;;
+  owns|owner|whoowns)           op_owns "$@" ;;
+  files|filelist|fl)            op_files "$@" ;;
   ""|-h|--help|help)            op_help ;;
   *)                            op_install "$verb" "$@" ;;
 esac
