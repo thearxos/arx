@@ -281,6 +281,7 @@ op_update(){
   local rc=$?
   if [ $rc -eq 0 ]; then
     [ "${n:-0}" -eq 0 ] && n=$(grep -cE '^\([0-9]+/[0-9]+\) upgrading' "$LOG" 2>/dev/null)
+    command -v yay >/dev/null 2>&1 && _run "upgrading AUR" yay -Sua --noconfirm
     _summary "system upgraded" "${n:-0}"
   else _no "$(_diagnose)"; fi
   return $rc
@@ -293,7 +294,15 @@ op_install(){
     [[ "$_a" == weaponCat-* ]] && _t+=("blackarch-${_a#weaponCat-}") || _t+=("$_a"); done
   set -- "${_t[@]}"
   _title "install" "$*"
-  if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then _no "$(_diagnose)"; return 1; fi
+  if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then
+    if command -v yay >/dev/null 2>&1 && grep -qi 'target not found' "$LOG"; then
+      _dim "not in the repositories - building from the AUR"; printf "\n"
+      _auth; _confirm || return 0
+      _run "building from AUR" yay -S --noconfirm "$@"; local rc=$?
+      [ $rc -eq 0 ] && _ok "installed from AUR: $*" || _no "$(_diagnose)"; return $rc
+    fi
+    _no "$(_diagnose)"; return 1
+  fi
   local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
   [ "${n:-0}" -gt 0 ] && { _dim "$n package(s) to install"; printf '%s\n' "$pkgs" | head -12 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s %s%s%s\n", D,R,$1,D,$2,R}'; printf "\n"; }
   _auth; _confirm || return 0
@@ -361,7 +370,10 @@ op_search(){
 op_info(){
   [ $# -eq 0 ] && { _title "info"; _no "no package specified"; return 1; }
   _title "info" "$*"
-  pacman -Si "$@" 2>/dev/null || pacman -Qi "$@" 2>/dev/null || _no "$(_diagnose)"
+  pacman -Si "$@" 2>/dev/null \
+    || { command -v yay >/dev/null 2>&1 && yay -Si "$@" 2>/dev/null; } \
+    || pacman -Qi "$@" 2>/dev/null \
+    || _no "$(_diagnose)"
   printf "\n"
 }
 
