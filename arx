@@ -45,6 +45,64 @@ _summary(){ # headline  n
   printf "  ${GR}>>${RS} %s\n     ${DM}%s${RS}\n\n" "$1" "$parts"
 }
 
+# Block progress bar: _bar <pct> [width]
+_bar(){
+  local p=${1:-0} w=${2:-16} f i out=""
+  [ "$p" -gt 100 ] 2>/dev/null && p=100; [ "$p" -lt 0 ] 2>/dev/null && p=0
+  f=$(( p * w / 100 ))
+  for ((i=0;i<f;i++)); do out+="█"; done
+  for ((i=f;i<w;i++)); do out+="░"; done
+  printf '%s' "$out"
+}
+
+# Modern live loader: runs the op in a PTY so pacman emits real per-package
+# progress, and renders one clean line — bar · % · current package · size · speed · X/N.
+# Records size/time/speed into ARX_DLSIZE/ARX_DLTIME/ARX_SPEED for the summary.
+_load(){ # label cmd...
+  local label="$1"; shift
+  ARX_DLSIZE=""; ARX_DLTIME=0; ARX_SPEED=""
+  : > "$LOG"
+  script -qefc "$*" "$LOG" >/dev/null 2>&1 & local pid=$!
+  printf '\033[?25l'
+  local i=0 N="" t_dl0=0 t_dl1=0
+  while kill -0 "$pid" 2>/dev/null; do
+    local t; t=$(tail -c 6000 "$LOG" 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g')
+    [ -z "$N" ] && N=$(printf '%s' "$t" | grep -oE 'Packages \(([0-9]+)\)' | grep -oE '[0-9]+' | tail -1)
+    local s2; s2=$(printf '%s' "$t" | grep -oiE 'Total Download Size:[[:space:]]*[0-9.]+ [KMG]iB' | tail -1 | grep -oiE '[0-9.]+ [KMG]iB')
+    [ -n "$s2" ] && ARX_DLSIZE="$s2"
+    local pkg="" cur_sz="" spd="" pct="" xn="" phase="$label"
+    local il; il=$(printf '%s' "$t" | grep -oE '\([0-9]+/[0-9]+\) (installing|upgrading|reinstalling|removing) [^ ]+' | tail -1)
+    if [ -n "$il" ]; then
+      xn=$(printf '%s' "$il" | grep -oE '[0-9]+/[0-9]+' | head -1)
+      phase=$(printf '%s' "$il" | awk '{print $2}'); pkg=$(printf '%s' "$il" | awk '{print $3}')
+      [ -n "$xn" ] && pct=$(( ${xn%/*} * 100 / ${xn#*/} ))
+      { [ "$t_dl0" -gt 0 ] && [ "$t_dl1" -eq 0 ]; } && t_dl1=$(date +%s)
+    else
+      { [ "$t_dl0" -eq 0 ] && printf '%s' "$t" | grep -qiE 'downloading|Retrieving'; } && t_dl0=$(date +%s)
+      local dl; dl=$(printf '%s' "$t" | grep -oE '[A-Za-z0-9][A-Za-z0-9._+-]+[[:space:]]+[0-9.]+ [KMG]iB[[:space:]]+[0-9.]+ [KMG]iB/s[^%]*[0-9]+%' | tail -1)
+      if [ -n "$dl" ]; then
+        phase="downloading"; pkg=$(printf '%s' "$dl" | awk '{print $1}')
+        cur_sz=$(printf '%s' "$dl" | grep -oE '[0-9.]+ [KMG]iB' | head -1)
+        spd=$(printf '%s' "$dl" | grep -oE '[0-9.]+ [KMG]iB/s' | head -1)
+        pct=$(printf '%s' "$dl" | grep -oE '[0-9]+%' | tail -1 | tr -d '%')
+      fi
+    fi
+    local line="  ${C}${SPIN[i++ % ${#SPIN[@]}]}${RS}  "
+    [ -n "$pct" ] && line+="${GR}$(_bar "$pct" 14)${RS} ${BD}${pct}%${RS}  "
+    line+="${C}${pkg:-$phase}${RS}"
+    [ -n "$cur_sz" ] && line+=" ${DM}${cur_sz}${RS}"
+    [ -n "$spd" ]    && line+=" ${DM}· ${spd}${RS}"
+    [ -n "$xn" ]     && line+=" ${DM}· ${xn}${RS}"
+    { [ -z "$xn" ] && [ -n "$N" ]; } && line+=" ${DM}· ${N} pkgs${RS}"
+    printf "\r\033[K%b" "$line"
+    sleep 0.15
+  done
+  wait "$pid"; local rc=$?
+  if [ "$t_dl0" -gt 0 ]; then [ "$t_dl1" -eq 0 ] && t_dl1=$(date +%s); ARX_DLTIME=$((t_dl1-t_dl0)); ARX_SPEED=$(_speed "$ARX_DLSIZE" "$ARX_DLTIME"); fi
+  printf '\r\033[K\033[?25h'
+  return $rc
+}
+
 # Turn raw pacman/yay log noise into one clean error line.
 _diagnose(){
   if   grep -qiE 'Resolving timed out|Could not resolve host|name resolution|No address record|failed retrieving file' "$LOG"; then
@@ -123,7 +181,7 @@ _heal(){
 _run(){ # label cmd...
   local label="$1"; shift
   _HEAL_N=0; local extra=() tries=0 f files
-  _quiet "$label" "$@"; local rc=$?
+  _load "$label" "$@"; local rc=$?
   while [ $rc -ne 0 ] && [ $tries -lt 2 ]; do
     if [ "$(_errkey)" = fileconflict ]; then
       files=$(grep -oiE '[^ ]+ exists in filesystem' "$LOG" | sed 's/ exists.*//' | sort -u)
@@ -134,7 +192,7 @@ _run(){ # label cmd...
       _HEAL_N=$((_HEAL_N+1)); _heal || break
     fi
     tries=$((tries+1))
-    _quiet "retry $tries · $label" "$@" "${extra[@]}"; rc=$?
+    _load "retry $tries · $label" "$@" "${extra[@]}"; rc=$?
   done
   return $rc
 }
