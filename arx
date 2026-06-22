@@ -220,17 +220,31 @@ _run(){ # label cmd...
 # AUR malware safety: fetch each PKGBUILD and flag high-risk patterns before building.
 _aur_safety(){ # pkg...
   command -v curl >/dev/null 2>&1 || return 0
-  local pkg pb hits flagged=0
+  local pkg pb hits meta risk flagged=0
   for pkg in "$@"; do
     [[ "$pkg" == -* ]] && continue
     pb=$(curl -fsSL --max-time 12 "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$pkg" 2>/dev/null)
-    [ -z "$pb" ] && continue
     hits=$(printf '%s\n' "$pb" | grep -niE \
       'curl[^|]*\|[[:space:]]*(ba)?sh|wget[^|]*\|[[:space:]]*(ba)?sh|base64[[:space:]]+-d.*\|[[:space:]]*(ba)?sh|\|[[:space:]]*(node|python[0-9]?|perl|ruby)[[:space:]]|/dev/tcp/|[^a-z](nc|ncat)[[:space:]][^|]*-e[[:space:]]|[^a-z]sudo[[:space:]]|systemctl[[:space:]]+enable|/etc/cron|[^a-z]useradd[[:space:]]|chmod[[:space:]]+777|>[[:space:]]*/etc/|npm[[:space:]][^|]*--unsafe-perm|npx[[:space:]]+[^[:space:]]*https?://|pip[0-9]?[[:space:]]+install[[:space:]]+[^[:space:]]*https?://' 2>/dev/null)
     if [ -n "$hits" ]; then
       _no "AUR safety flagged '$pkg' (PKGBUILD):"
       printf '%s\n' "$hits" | head -5 | sed -E 's/^/      /'
       flagged=$((flagged+1))
+    fi
+    # reputation: out-of-date / orphaned / brand-new (hijack-prone) via the AUR RPC
+    if command -v python3 >/dev/null 2>&1; then
+      meta=$(curl -fsSL -g --max-time 10 "https://aur.archlinux.org/rpc/v5/info?arg[]=$pkg" 2>/dev/null)
+      risk=$(printf '%s' "$meta" | python3 -c 'import sys,json,time
+try:
+ d=json.load(sys.stdin).get("results") or []
+ r=d[0] if d else {}; o=[]
+ if r.get("OutOfDate"): o.append("flagged out-of-date")
+ if d and not r.get("Maintainer"): o.append("orphaned (no maintainer)")
+ v=r.get("NumVotes",0); a=(time.time()-r.get("FirstSubmitted",0))/86400 if r.get("FirstSubmitted") else 999
+ if d and v<3 and a<30: o.append("brand-new + unvetted ("+str(v)+" votes)")
+ print(" . ".join(o))
+except: pass' 2>/dev/null)
+      if [ -n "$risk" ]; then _no "AUR reputation '$pkg': $risk"; flagged=$((flagged+1)); fi
     fi
   done
   if [ "$flagged" -gt 0 ]; then
