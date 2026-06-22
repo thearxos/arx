@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# arx - ARXOS unified package manager
+# A tiny, quiet TUI over pacman/yay. All repo/sync noise is suppressed and
+# replaced with a clean phase-aware spinner; errors are detected and shown
+# as a single readable line.
+#
+#   arx update            full system upgrade
+#   arx install <pkg...>  install package(s)
+#   arx remove  <pkg...>  remove package(s) + unneeded deps
+#   arx search  <term>    search the repositories
+#   arx info    <pkg>     package details
+#   arx clean             trim the package cache
+#   arx orphans           remove orphaned dependencies
+#   arx aur <pkg...>      install from the AUR (yay)
+#   flags: -y/--yes assume yes   |   arx <pkg> installs directly
+
+set -o pipefail
+
+GB=$'\033[1;38;5;220m'; CB=$'\033[1;38;5;45m'; C=$'\033[38;5;45m'
+GR=$'\033[1;32m'; RD=$'\033[1;31m'; DM=$'\033[90m'; BD=$'\033[1m'; RS=$'\033[0m'
+
+LOG=$(mktemp /tmp/arx.XXXXXX); trap 'rm -f "$LOG"; [ -t 1 ] && printf "\033[?25h" 2>/dev/null' EXIT INT TERM
+SPIN=('|' '/' '-' '\')
+ASSUME_YES=""
+
+_title(){ printf "\n  ${GB}arx${RS} ${DM}::${RS} ${BD}%s${RS}" "$1"; [ -n "${2:-}" ] && printf " ${C}%s${RS}" "$2"; printf "\n\n"; }
+_ok(){  printf "  ${GR}>>${RS} %s\n\n" "$1"; }
+_no(){  printf "  ${RD}xx${RS} %s\n\n" "$1"; }
+_dim(){ printf "  ${DM}%s${RS}\n" "$1"; }
+
+# Turn raw pacman/yay log noise into one clean error line.
+_diagnose(){
+  if   grep -qiE 'Resolving timed out|Could not resolve host|name resolution|No address record|failed retrieving file' "$LOG"; then
+        echo "network unreachable - could not reach the mirrors (check DNS / connection)"
+  elif grep -qi 'failed to synchronize all databases' "$LOG"; then
+        echo "could not synchronize the repositories"
+  elif grep -qiE 'target not found' "$LOG"; then
+        echo "not found: $(grep -ioE 'target not found: [^ ]+' "$LOG" | sed 's/.*: //' | tr '\n' ' ')"
+  elif grep -qiE 'exists in filesystem|conflicting files' "$LOG"; then
+        echo "file conflict: $(grep -iE 'exists in filesystem' "$LOG" | head -1 | sed -E 's/.*: //;s/ exists.*//')"
+  elif grep -qiE 'are in conflict|unresolvable package conflicts'  "$LOG"; then
+        echo "package conflict: $(grep -iE 'are in conflict' "$LOG" | head -1 | sed 's/^[: ]*//')"
+  elif grep -qiE 'invalid or corrupted package|signature .*unknown|key .* could not be looked up|unknown trust' "$LOG"; then
+        echo "keyring/signature problem - refresh the keyring and retry"
+  elif grep -qiE 'could not satisfy dependencies|unable to satisfy dependency'      "$LOG"; then
+        echo "unsatisfied dependencies"
+  elif grep -qiE 'not enough free disk space'  "$LOG"; then
+        echo "not enough disk space"
+  elif grep -qiE 'could not lock database|unable to lock'  "$LOG"; then
+        echo "database is locked (another package operation is running)"
+  else
+        local e; e=$(grep -iE '^error:' "$LOG" | head -1 | sed 's/^error: //I')
+        echo "${e:-operation failed}"
+  fi
+}
+
+# Run a command silently with a phase-aware spinner derived from its log.
+_quiet(){ # default_label cmd...
+  local label="$1"; shift
+  ( "$@" >"$LOG" 2>&1 ) & local pid=$! i=0 ph
+  printf '\033[?25l'
+  while kill -0 "$pid" 2>/dev/null; do
+    ph="$label"
+    if   grep -q 'Running .*transaction hooks' "$LOG" 2>/dev/null; then ph="finalizing"
+    elif grep -qE '\([0-9]+/[0-9]+\) (installing|upgrading|reinstalling|removing)' "$LOG" 2>/dev/null; then
+         ph="applying $(grep -oE '\([0-9]+/[0-9]+\) (installing|upgrading|reinstalling|removing)' "$LOG" | tail -1 | grep -oE '[0-9]+/[0-9]+')"
+    elif grep -qiE 'checking (keys|package integrity)|loading package files' "$LOG" 2>/dev/null; then ph="verifying"
+    elif grep -qiE 'Retrieving packages|downloading'   "$LOG" 2>/dev/null; then ph="downloading"
+    elif grep -qiE 'system upgrade|resolving dependencies|looking for conflicting' "$LOG" 2>/dev/null; then ph="resolving"
+    elif grep -qiE 'Synchronizing package databases'   "$LOG" 2>/dev/null; then ph="synchronizing"
+    fi
+    printf "\r  ${C}%s${RS}  ${DM}%s${RS}\033[K" "${SPIN[i++ % ${#SPIN[@]}]}" "$ph"
+    sleep 0.1
+  done
+  wait "$pid"; local rc=$?
+  printf '\r\033[K\033[?25h'
+  return $rc
+}
+
+_confirm(){ # prompt-noun
+  [ -n "$ASSUME_YES" ] && return 0
+  printf "  ${BD}proceed?${RS} ${DM}[y/N]${RS} "
+  local a; read -r a; [[ "$a" =~ ^[Yy]$ ]] && return 0
+  _dim "cancelled"; printf "\n"; return 1
+}
+
+_auth(){ sudo -n true 2>/dev/null && return 0; sudo -v 2>/dev/null && return 0; _no "sudo authentication required"; exit 1; }
+
+# ---------------- operations ----------------
+op_update(){
+  _title "system upgrade"
+  _auth
+  local list n=0
+  if command -v checkupdates >/dev/null 2>&1; then
+    _quiet "checking for updates" checkupdates
+    if grep -qiE 'Resolving timed out|could not resolve|failed retrieving|name resolution' "$LOG"; then _no "$(_diagnose)"; return 1; fi
+    list=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$list" | grep -c . 2>/dev/null)
+    if [ "${n:-0}" -eq 0 ]; then _ok "system is up to date"; return 0; fi
+    _dim "$n package(s) to upgrade"
+    printf '%s\n' "$list" | head -8 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s\n", D, R, $1}'
+    [ "$n" -gt 8 ] && _dim "  ...and $((n-8)) more"
+    printf "\n"
+  fi
+  _confirm || return 0
+  _quiet "upgrading" sudo pacman -Syu --noconfirm
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "system upgraded${list:+ · $n package(s)}" || _no "$(_diagnose)"
+  return $rc
+}
+
+op_install(){
+  [ $# -eq 0 ] && { _title "install"; _no "no package specified"; return 1; }
+  _title "install" "$*"
+  if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then _no "$(_diagnose)"; return 1; fi
+  local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
+  [ "${n:-0}" -gt 0 ] && { _dim "$n package(s) to install"; printf '%s\n' "$pkgs" | head -12 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s %s%s%s\n", D,R,$1,D,$2,R}'; printf "\n"; }
+  _auth; _confirm || return 0
+  _quiet "installing" sudo pacman -S --noconfirm "$@"
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "installed: $*" || _no "$(_diagnose)"
+  return $rc
+}
+
+op_remove(){
+  [ $# -eq 0 ] && { _title "remove"; _no "no package specified"; return 1; }
+  _title "remove" "$*"
+  if ! pacman -Rs --print "$@" >"$LOG" 2>&1; then _no "$(_diagnose)"; return 1; fi
+  local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9/]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
+  [ "${n:-0}" -gt 0 ] && { _dim "$n package(s) to remove"; printf '%s\n' "$pkgs" | sed 's#.*/##' | head -12 | awk -v D="$DM" -v R="$RS" '{printf "    %s-%s %s\n", D,R,$1}'; printf "\n"; }
+  _auth; _confirm || return 0
+  _quiet "removing" sudo pacman -Rns --noconfirm "$@"
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "removed: $*" || _no "$(_diagnose)"
+  return $rc
+}
+
+op_search(){
+  [ $# -eq 0 ] && { _title "search"; _no "no search term"; return 1; }
+  _title "search" "$*"
+  pacman --color never -Ss "$@" >"$LOG" 2>&1
+  if grep -qiE 'Resolving timed out|could not resolve' "$LOG"; then _no "$(_diagnose)"; return 1; fi
+  if [ ! -s "$LOG" ]; then _dim "no results"; printf "\n"; return 0; fi
+  awk -v CB="$CB" -v DM="$DM" -v GR="$GR" -v Z="$RS" '
+    /^[a-z0-9]/ {
+      split($1, a, "/"); repo=a[1]; name=a[2];
+      inst = (index($0, "[installed") > 0) ? "  " GR "[installed]" Z : "";
+      printf "  " CB "%s" Z " " DM "%s" Z "  " DM "%s" Z "%s\n", name, $2, repo, inst; next
+    }
+    { sub(/^[ \t]+/, ""); printf "    %s\n", $0 }
+  ' "$LOG"
+  printf "\n"
+}
+
+op_info(){
+  [ $# -eq 0 ] && { _title "info"; _no "no package specified"; return 1; }
+  _title "info" "$*"
+  pacman -Si "$@" 2>/dev/null || pacman -Qi "$@" 2>/dev/null || _no "$(_diagnose)"
+  printf "\n"
+}
+
+op_clean(){
+  _title "cache clean"
+  _auth
+  if command -v paccache >/dev/null 2>&1; then
+    _quiet "trimming cache" bash -c 'sudo paccache -rk2; sudo paccache -ruk0'
+  else
+    _quiet "trimming cache" sudo pacman -Sc --noconfirm
+  fi
+  _ok "cache trimmed"
+}
+
+op_orphans(){
+  _title "orphan sweep"
+  local orphs; orphs=$(pacman -Qtdq 2>/dev/null)
+  if [ -z "$orphs" ]; then _ok "no orphaned packages"; return 0; fi
+  local n; n=$(printf '%s\n' "$orphs" | grep -c .)
+  _dim "$n orphan(s)"; printf '%s\n' "$orphs" | head -15 | awk -v D="$DM" -v R="$RS" '{printf "    %s-%s %s\n", D,R,$1}'; printf "\n"
+  _auth; _confirm || return 0
+  _quiet "removing orphans" bash -c "pacman -Qtdq | sudo pacman -Rns --noconfirm -"
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "orphans removed" || _no "$(_diagnose)"
+}
+
+op_aur(){
+  [ $# -eq 0 ] && { _title "AUR"; _no "no package specified"; return 1; }
+  command -v yay >/dev/null 2>&1 || { _title "AUR"; _no "yay is not installed"; return 1; }
+  _title "AUR install" "$*"
+  _quiet "building" yay -S --noconfirm "$@"
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "installed from AUR: $*" || _no "$(_diagnose)"
+}
+
+op_help(){
+  printf "\n  ${GB}arx${RS} ${DM}- ARXOS package manager${RS}\n\n"
+  printf "  ${C}%-20s${RS}%s\n" "arx update"        "full system upgrade"
+  printf "  ${C}%-20s${RS}%s\n" "arx install <pkg>" "install package(s)"
+  printf "  ${C}%-20s${RS}%s\n" "arx remove <pkg>"  "remove package(s) + deps"
+  printf "  ${C}%-20s${RS}%s\n" "arx search <term>" "search repositories"
+  printf "  ${C}%-20s${RS}%s\n" "arx info <pkg>"    "package details"
+  printf "  ${C}%-20s${RS}%s\n" "arx clean"         "trim the package cache"
+  printf "  ${C}%-20s${RS}%s\n" "arx orphans"       "remove orphaned deps"
+  printf "  ${C}%-20s${RS}%s\n" "arx aur <pkg>"     "install from the AUR"
+  printf "\n  ${DM}-y/--yes assume yes  ·  arx <pkg> installs directly${RS}\n\n"
+}
+
+# ---------------- dispatch ----------------
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    -y|--yes|--noconfirm) ASSUME_YES=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+set -- "${ARGS[@]}"
+verb="${1:-}"; [ $# -gt 0 ] && shift
+
+case "$verb" in
+  up|update|upgrade|sync|syu)   op_update "$@" ;;
+  in|install|i|add)             op_install "$@" ;;
+  rm|remove|r|del|uninstall)    op_remove "$@" ;;
+  se|search|s|find|q)           op_search "$@" ;;
+  if|info|show)                 op_info "$@" ;;
+  cl|clean|cc)                  op_clean ;;
+  orphans|autoremove|sweep)     op_orphans ;;
+  aur)                          op_aur "$@" ;;
+  ""|-h|--help|help)            op_help ;;
+  *)                            op_install "$verb" "$@" ;;
+esac
