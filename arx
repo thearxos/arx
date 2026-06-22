@@ -33,7 +33,7 @@ _speed(){
   local sz="$1" t="$2" num unit
   [ -z "$sz" ] && return; [ "${t:-0}" -le 0 ] && return
   num=$(printf '%s' "$sz" | grep -oE '[0-9.]+'); unit=$(printf '%s' "$sz" | grep -oE '[KMG]iB')
-  awk -v n="$num" -v u="$unit" -v t="$t" 'BEGIN{m=(u=="GiB")?n*1024:(u=="KiB")?n/1024:n; if(t>0)printf "%.1f MiB/s", m/t}'
+  awk -v n="$num" -v u="$unit" -v t="$t" 'BEGIN{m=(u=="GiB")?n*1024:(u=="KiB")?n/1024:n; if(t>0){s=m/t; if(s>=1)printf "%.1f MiB/s",s; else printf "%.0f KiB/s",s*1024}}'
 }
 
 # Clean one-line summary: packages · size · speed · time.
@@ -69,6 +69,74 @@ _diagnose(){
         local e; e=$(grep -iE '^error:' "$LOG" | head -1 | sed 's/^error: //I')
         echo "${e:-operation failed}"
   fi
+}
+
+# Classify the failure in $LOG into a known error class (Arch Wiki: Pacman/Troubleshooting).
+_errkey(){
+  if   grep -qiE 'exists in filesystem|conflicting files'                                   "$LOG"; then echo fileconflict
+  elif grep -qiE 'signature .*(unknown|marginal|never)|unknown trust|PGP signature|could not be looked up|GPGME|invalid or corrupted package \(PGP' "$LOG"; then echo keyring
+  elif grep -qiE 'could not lock database|unable to lock'                                   "$LOG"; then echo lock
+  elif grep -qiE 'failed to synchronize all databases|failed retrieving file.*\.db|error.*404|failed to update' "$LOG"; then echo db
+  elif grep -qiE 'invalid or corrupted package|wrong or NULL|unexpected end of file'         "$LOG"; then echo corrupt
+  elif grep -qiE 'not enough free disk space'                                                "$LOG"; then echo diskspace
+  elif grep -qiE 'could not resolve host|Resolving timed out|name resolution|Network is unreachable|Could not connect|Connection timed out' "$LOG"; then echo network
+  elif grep -qiE 'could not satisfy dependencies|unable to satisfy dependency'               "$LOG"; then echo deps
+  else echo unknown; fi
+}
+
+# Self-heal: apply the known fix for the detected error. Returns 0 if a fix was
+# applied (the caller should retry the operation), 1 if there is no auto-fix.
+_heal(){
+  local k kr pop pkgs; k=$(_errkey)
+  case "$k" in
+    keyring)
+      kr=$(_keyrings); pop="${kr%|*}"; pkgs="${kr#*|}"
+      if [ "${_HEAL_N:-1}" -ge 2 ]; then _dim "self-heal · rebuilding keyring from scratch"; sudo rm -rf /etc/pacman.d/gnupg
+      else _dim "self-heal · repairing keyring + signatures"; fi
+      sudo pacman-key --init       >>"$LOG" 2>&1
+      sudo pacman-key --populate $pop >>"$LOG" 2>&1
+      sudo pacman -Sy --noconfirm $pkgs >>"$LOG" 2>&1; return 0 ;;
+    lock)
+      pgrep -x pacman >/dev/null 2>&1 && return 1
+      _dim "self-heal · clearing stale database lock"; sudo rm -f /var/lib/pacman/db.lck; return 0 ;;
+    db|network)
+      if [ "${_HEAL_N:-1}" -ge 2 ]; then _dim "self-heal · rebuilding sync databases"; sudo rm -f /var/lib/pacman/sync/*.db 2>/dev/null
+      else _dim "self-heal · re-ranking mirrors + refreshing databases"; fi
+      command -v reflector >/dev/null 2>&1 && sudo bash -c 'reflector --latest 20 --sort rate --protocol https,http --save /etc/pacman.d/mirrorlist' >>"$LOG" 2>&1
+      sudo pacman -Syy >>"$LOG" 2>&1; return 0 ;;
+    corrupt)
+      _dim "self-heal · clearing corrupted downloads"
+      sudo find /var/cache/pacman/pkg -name '*.part' -delete 2>/dev/null
+      sudo pacman -Scc --noconfirm >>"$LOG" 2>&1; return 0 ;;
+    diskspace)
+      _dim "self-heal · freeing disk space"
+      command -v paccache >/dev/null 2>&1 && sudo paccache -rk1 >>"$LOG" 2>&1
+      sudo pacman -Sc --noconfirm >>"$LOG" 2>&1; return 0 ;;
+    deps)
+      _dim "self-heal · full system sync to resolve dependencies"
+      sudo pacman -Syu --noconfirm >>"$LOG" 2>&1; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Run a pacman operation with up to two self-heal + retry cycles.
+_run(){ # label cmd...
+  local label="$1"; shift
+  _HEAL_N=0; local extra=() tries=0 f files
+  _quiet "$label" "$@"; local rc=$?
+  while [ $rc -ne 0 ] && [ $tries -lt 2 ]; do
+    if [ "$(_errkey)" = fileconflict ]; then
+      files=$(grep -oiE '[^ ]+ exists in filesystem' "$LOG" | sed 's/ exists.*//' | sort -u)
+      [ -z "$files" ] && break
+      extra=(); for f in $files; do extra+=(--overwrite "$f"); done
+      _dim "self-heal · overwriting $(printf '%s\n' "$files" | grep -c .) conflicting file(s)"
+    else
+      _HEAL_N=$((_HEAL_N+1)); _heal || break
+    fi
+    tries=$((tries+1))
+    _quiet "retry $tries · $label" "$@" "${extra[@]}"; rc=$?
+  done
+  return $rc
 }
 
 # Run a command silently with a phase-aware spinner derived from its log.
@@ -131,7 +199,7 @@ op_update(){
     printf "\n"
   fi
   _confirm || return 0
-  _quiet "upgrading" sudo pacman -Syu --noconfirm
+  _run "upgrading" sudo pacman -Syu --noconfirm
   local rc=$?
   if [ $rc -eq 0 ]; then
     [ "${n:-0}" -eq 0 ] && n=$(grep -cE '^\([0-9]+/[0-9]+\) upgrading' "$LOG" 2>/dev/null)
@@ -151,7 +219,7 @@ op_install(){
   local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
   [ "${n:-0}" -gt 0 ] && { _dim "$n package(s) to install"; printf '%s\n' "$pkgs" | head -12 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s %s%s%s\n", D,R,$1,D,$2,R}'; printf "\n"; }
   _auth; _confirm || return 0
-  _quiet "installing" sudo pacman -S --noconfirm "$@"
+  _run "installing" sudo pacman -S --noconfirm "$@"
   local rc=$?
   [ $rc -eq 0 ] && _summary "installed" "${n:-0}" || _no "$(_diagnose)"
   return $rc
@@ -164,7 +232,7 @@ op_remove(){
   local pkgs n; pkgs=$(grep -E '^[a-zA-Z0-9/]' "$LOG"); n=$(printf '%s' "$pkgs" | grep -c .)
   [ "${n:-0}" -gt 0 ] && { _dim "$n package(s) to remove"; printf '%s\n' "$pkgs" | sed 's#.*/##' | head -12 | awk -v D="$DM" -v R="$RS" '{printf "    %s-%s %s\n", D,R,$1}'; printf "\n"; }
   _auth; _confirm || return 0
-  _quiet "removing" sudo pacman -Rns --noconfirm "$@"
+  _run "removing" sudo pacman -Rns --noconfirm "$@"
   local rc=$?
   [ $rc -eq 0 ] && _summary "removed" "${n:-0}" || _no "$(_diagnose)"
   return $rc
@@ -172,18 +240,43 @@ op_remove(){
 
 op_search(){
   [ $# -eq 0 ] && { _title "search"; _no "no search term"; return 1; }
-  _title "search" "$*"
-  pacman --color never -Ss "$@" >"$LOG" 2>&1
-  if grep -qiE 'Resolving timed out|could not resolve' "$LOG"; then _no "$(_diagnose)"; return 1; fi
-  if [ ! -s "$LOG" ]; then _dim "no results"; printf "\n"; return 0; fi
-  awk -v CB="$CB" -v DM="$DM" -v GR="$GR" -v Z="$RS" '
-    /^[a-z0-9]/ {
-      split($1, a, "/"); repo=a[1]; name=a[2];
-      inst = (index($0, "[installed") > 0) ? "  " GR "[installed]" Z : "";
-      printf "  " CB "%s" Z " " DM "%s" Z "  " DM "%s" Z "%s\n", name, $2, repo, inst; next
-    }
-    { sub(/^[ \t]+/, ""); printf "    %s\n", $0 }
-  ' "$LOG"
+  local mode=all a; local -a terms=()
+  for a in "$@"; do case "$a" in
+    -r|--repo|--pacman) mode=repo ;;
+    -a|--aur)           mode=aur  ;;
+    *) terms+=("$a") ;;
+  esac; done
+  [ ${#terms[@]} -eq 0 ] && { _title "search"; _no "no search term"; return 1; }
+  _title "search" "${terms[*]}"
+  local found=0
+  # official repositories (instant)
+  if [ "$mode" != aur ]; then
+    pacman --color never -Ss "${terms[@]}" >"$LOG" 2>&1
+    if grep -qiE 'Resolving timed out|could not resolve' "$LOG"; then _no "$(_diagnose)"; return 1; fi
+    if [ -s "$LOG" ] && grep -qE '^[a-z0-9]' "$LOG"; then
+      [ "$mode" = all ] && printf "  ${DM}official repositories${RS}\n"
+      awk -v CB="$CB" -v DM="$DM" -v GR="$GR" -v Z="$RS" '
+        /^[a-z0-9]/ { split($1,a,"/"); name=a[2];
+          inst=(index($0,"[installed")>0)?"  " GR "[installed]" Z:"";
+          printf "  " CB "%s" Z " " DM "%s" Z "  " DM "%s" Z "%s\n", name,$2,a[1],inst; next }
+        { sub(/^[ \t]+/,""); printf "    %s\n",$0 }' "$LOG"
+      found=1
+    fi
+  fi
+  # AUR via yay (network-backed)
+  if [ "$mode" != repo ] && command -v yay >/dev/null 2>&1; then
+    yay --aur --color never -Ss "${terms[@]}" >"$LOG" 2>&1
+    if [ -s "$LOG" ] && grep -qE '^aur/' "$LOG"; then
+      [ "$mode" = all ] && printf "\n  ${DM}AUR${RS}\n"
+      awk -v O="$C" -v DM="$DM" -v GR="$GR" -v Z="$RS" '
+        /^aur\// { name=substr($1,5);
+          inst=(index($0,"[installed")>0)?"  " GR "[installed]" Z:"";
+          printf "  " O "%s" Z " " DM "%s" Z "  " DM "aur" Z "%s\n", name,$2,inst; next }
+        { sub(/^[ \t]+/,""); printf "    %s\n",$0 }' "$LOG"
+      found=1
+    fi
+  fi
+  [ "$found" -eq 0 ] && _dim "no results"
   printf "\n"
 }
 
