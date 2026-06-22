@@ -226,7 +226,7 @@ _aur_safety(){ # pkg...
     pb=$(curl -fsSL --max-time 12 "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$pkg" 2>/dev/null)
     [ -z "$pb" ] && continue
     hits=$(printf '%s\n' "$pb" | grep -niE \
-      'curl[^|]*\|[[:space:]]*(ba)?sh|wget[^|]*\|[[:space:]]*(ba)?sh|base64[[:space:]]+-d.*\|[[:space:]]*(ba)?sh|/dev/tcp/|[^a-z](nc|ncat)[[:space:]][^|]*-e[[:space:]]|[^a-z]sudo[[:space:]]|systemctl[[:space:]]+enable|/etc/cron|[^a-z]useradd[[:space:]]|chmod[[:space:]]+777|>[[:space:]]*/etc/' 2>/dev/null)
+      'curl[^|]*\|[[:space:]]*(ba)?sh|wget[^|]*\|[[:space:]]*(ba)?sh|base64[[:space:]]+-d.*\|[[:space:]]*(ba)?sh|\|[[:space:]]*(node|python[0-9]?|perl|ruby)[[:space:]]|/dev/tcp/|[^a-z](nc|ncat)[[:space:]][^|]*-e[[:space:]]|[^a-z]sudo[[:space:]]|systemctl[[:space:]]+enable|/etc/cron|[^a-z]useradd[[:space:]]|chmod[[:space:]]+777|>[[:space:]]*/etc/|npm[[:space:]][^|]*--unsafe-perm|npx[[:space:]]+[^[:space:]]*https?://|pip[0-9]?[[:space:]]+install[[:space:]]+[^[:space:]]*https?://' 2>/dev/null)
     if [ -n "$hits" ]; then
       _no "AUR safety flagged '$pkg' (PKGBUILD):"
       printf '%s\n' "$hits" | head -5 | sed -E 's/^/      /'
