@@ -38,7 +38,19 @@ _speed(){
 
 # Clean one-line summary: packages · size · speed · time.
 _summary(){ # headline  n
-  local parts="${2} package(s)"
+  # operation breakdown straight from the transaction log
+  local up ins rem rei b=() x brk=""
+  up=$(grep -cE '^\([0-9]+/[0-9]+\) upgrading'     "$LOG" 2>/dev/null)
+  ins=$(grep -cE '^\([0-9]+/[0-9]+\) installing'   "$LOG" 2>/dev/null)
+  rem=$(grep -cE '^\([0-9]+/[0-9]+\) removing'     "$LOG" 2>/dev/null)
+  rei=$(grep -cE '^\([0-9]+/[0-9]+\) reinstalling' "$LOG" 2>/dev/null)
+  [ "${up:-0}"  -gt 0 ] && b+=("${up} upgraded")
+  [ "${ins:-0}" -gt 0 ] && b+=("${ins} installed")
+  [ "${rem:-0}" -gt 0 ] && b+=("${rem} removed")
+  [ "${rei:-0}" -gt 0 ] && b+=("${rei} reinstalled")
+  for x in "${b[@]}"; do [ -n "$brk" ] && brk="$brk · $x" || brk="$x"; done
+  local parts="${brk:-${2} package(s)}"
+  [ "${ARX_HEALED:-0}" -gt 0 ] && parts="$parts · ${ARX_HEALED} self-healed"
   [ -n "$ARX_DLSIZE" ] && parts="$parts · $ARX_DLSIZE"
   [ -n "$ARX_SPEED"  ] && parts="$parts · $ARX_SPEED"
   [ "${ARX_DLTIME:-0}" -gt 0 ] && parts="$parts · ${ARX_DLTIME}s"
@@ -200,7 +212,7 @@ _heal(){
 # Run a pacman operation with up to two self-heal + retry cycles.
 _run(){ # label cmd...
   local label="$1"; shift
-  _HEAL_N=0; local extra=() tries=0 f files
+  _HEAL_N=0; ARX_HEALED=0; local extra=() tries=0 f files
   _load "$label" "$@"; local rc=$?
   while [ $rc -ne 0 ] && [ $tries -lt 2 ]; do
     if [ "$(_errkey)" = fileconflict ]; then
@@ -214,6 +226,7 @@ _run(){ # label cmd...
     tries=$((tries+1))
     _load "retry $tries · $label" "$@" "${extra[@]}"; rc=$?
   done
+  ARX_HEALED=$tries
   return $rc
 }
 
