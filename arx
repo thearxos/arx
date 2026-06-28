@@ -311,6 +311,7 @@ _quiet(){ # default_label cmd...
 
 _confirm(){ # prompt-noun
   [ -n "$ASSUME_YES" ] && return 0
+  [ ! -t 0 ] && return 0   # non-interactive (ARXOS Control Center GUI / piped): proceed
   printf "  ${BD}proceed?${RS} ${DM}[y/N]${RS} "
   local a; read -r a; [[ "$a" =~ ^[Yy]$ ]] && return 0
   _dim "cancelled"; printf "\n"; return 1
