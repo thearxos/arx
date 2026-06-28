@@ -153,6 +153,7 @@ _errkey(){
   elif grep -qiE 'exists in filesystem|conflicting files'                                   "$LOG"; then echo fileconflict
   elif grep -qiE 'signature .*(unknown|marginal|never)|unknown trust|PGP signature|could not be looked up|GPGME|invalid or corrupted package \(PGP' "$LOG"; then echo keyring
   elif grep -qiE 'could not lock database|unable to lock'                                   "$LOG"; then echo lock
+  elif grep -qiE 'certificate has expired|certificate is not yet valid|SSL certificate|certificate verify failed|SSL_ERROR|TLS connect|gnutls_handshake|unable to get local issuer|failed retrieving file .* from [^ ]+ :' "$LOG"; then echo mirror
   elif grep -qiE 'failed to synchronize all databases|failed retrieving file.*\.db|error.*404|failed to update' "$LOG"; then echo db
   elif grep -qiE 'invalid or corrupted package|wrong or NULL|unexpected end of file'         "$LOG"; then echo corrupt
   elif grep -qiE 'not enough free disk space'                                                "$LOG"; then echo diskspace
@@ -178,10 +179,13 @@ _heal(){
     lock)
       pgrep -x pacman >/dev/null 2>&1 && return 1
       _dim "self-heal · clearing stale database lock"; sudo rm -f /var/lib/pacman/db.lck; return 0 ;;
-    db|network)
+    db|network|mirror)
       if [ "${_HEAL_N:-1}" -ge 2 ]; then _dim "self-heal · rebuilding sync databases"; sudo rm -f /var/lib/pacman/sync/*.db 2>/dev/null
-      else _dim "self-heal · re-ranking mirrors + refreshing databases"; fi
-      command -v reflector >/dev/null 2>&1 && sudo bash -c 'reflector --latest 20 --sort rate --protocol https,http --save /etc/pacman.d/mirrorlist' >>"$LOG" 2>&1
+      else _dim "self-heal · re-ranking mirrors (fresh · https) + refreshing databases"; fi
+      if command -v reflector >/dev/null 2>&1; then
+        sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.arx-bak 2>/dev/null
+        sudo bash -c 'reflector --age 12 --latest 20 --sort rate --protocol https --save /etc/pacman.d/mirrorlist 2>/dev/null; [ "$(grep -c ^Server /etc/pacman.d/mirrorlist)" -ge 5 ] || reflector --latest 20 --sort rate --protocol https,http --save /etc/pacman.d/mirrorlist 2>/dev/null' >>"$LOG" 2>&1
+      fi
       sudo pacman -Syy >>"$LOG" 2>&1; return 0 ;;
     corrupt)
       _dim "self-heal · clearing corrupted downloads"
