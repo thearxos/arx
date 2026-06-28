@@ -74,6 +74,12 @@ _load(){ # label cmd...
   local label="$1"; shift
   ARX_DLSIZE=""; ARX_DLTIME=0; ARX_SPEED=""
   : > "$LOG"
+  if [ ! -t 1 ]; then
+    # No TTY (e.g. launched from the ARXOS Control Center GUI): run plainly, stream output, no spinner.
+    printf '  >> %s\n' "$label"
+    script -qefc "$*" "$LOG" 2>&1 | sed -u 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g'
+    return ${PIPESTATUS[0]}
+  fi
   script -qefc "$*" "$LOG" >/dev/null 2>&1 & local pid=$!
   printf '\033[?25l'
   local i=0 N="" t_dl0=0 t_dl1=0
