@@ -21,6 +21,7 @@ GR=$'\033[1;32m'; RD=$'\033[1;31m'; DM=$'\033[90m'; BD=$'\033[1m'; RS=$'\033[0m'
 
 LOG=$(mktemp /tmp/arx.XXXXXX); trap 'rm -f "$LOG"; [ -t 1 ] && printf "\033[?25h" 2>/dev/null' EXIT INT TERM
 SPIN=('|' '/' '-' '\')
+VERSION="0.0.1"
 ASSUME_YES=""
 
 _title(){ printf "\n  ${GB}arx${RS} ${DM}::${RS} ${BD}%s${RS}" "$1"; [ -n "${2:-}" ] && printf " ${C}%s${RS}" "$2"; printf "\n\n"; }
