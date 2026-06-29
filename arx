@@ -83,7 +83,7 @@ _load(){ # label cmd...
     # per state change (downloading X/N · upgrading pkg X/N) instead of thousands
     # of progress-bar frames.
     printf '  >> %s\n' "$label"
-    script -qefc "$*" "$LOG" >/dev/null 2>&1 & local pid=$!
+    script -qefc "set -f; $*" "$LOG" >/dev/null 2>&1 & local pid=$!   # set -f: args are final; never glob-expand (e.g. --overwrite '/path/*')
     local last="" N="" t_dl0=0 t_dl1=0 now=""
     while kill -0 "$pid" 2>/dev/null; do
       local t; t=$(tail -c 6000 "$LOG" 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g')
@@ -109,7 +109,7 @@ _load(){ # label cmd...
     if [ "$t_dl0" -gt 0 ]; then [ "$t_dl1" -eq 0 ] && t_dl1=$(date +%s); ARX_DLTIME=$((t_dl1-t_dl0)); ARX_SPEED=$(_speed "$ARX_DLSIZE" "$ARX_DLTIME"); fi
     return $rc
   fi
-  script -qefc "$*" "$LOG" >/dev/null 2>&1 & local pid=$!
+  script -qefc "set -f; $*" "$LOG" >/dev/null 2>&1 & local pid=$!   # set -f: args are final; never glob-expand (e.g. --overwrite '/path/*')
   printf '\033[?25l'
   local i=0 N="" t_dl0=0 t_dl1=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -267,8 +267,17 @@ _run(){ # label cmd...
     if [ "$(_errkey)" = fileconflict ]; then
       files=$(grep -oiE '[^ ]+ exists in filesystem' "$LOG" | sed 's/ exists.*//' | sort -u)
       [ -z "$files" ] && break
-      extra=(); for f in $files; do extra+=(--overwrite "$f"); done
-      _dim "self-heal · overwriting $(printf '%s\n' "$files" | grep -c .) conflicting file(s)"
+      local nf d f; nf=$(printf '%s\n' "$files" | grep -c .); extra=()
+      if [ "$nf" -gt 80 ]; then
+        # massive conflict (usually stray files from a prior manual/git install) —
+        # overwrite by common parent path, not one --overwrite per file (a 10k-arg
+        # argv breaks the retry; this still scopes the override to the clash dirs).
+        for d in $(printf '%s\n' "$files" | sed -E 's#(/[^/]+/[^/]+)/.*#\1#' | sort -u); do extra+=(--overwrite "$d/*"); done
+        _dim "self-heal · overwriting $nf stray file(s)"
+      else
+        for f in $files; do extra+=(--overwrite "$f"); done
+        _dim "self-heal · overwriting $nf conflicting file(s)"
+      fi
     else
       _HEAL_N=$((_HEAL_N+1)); _heal || break
     fi
