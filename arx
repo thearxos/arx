@@ -200,7 +200,14 @@ _heal(){
   case "$k" in
     keyring)
       kr=$(_keyrings); pop="${kr%|*}"; pkgs="${kr#*|}"
-      if [ "${_HEAL_N:-1}" -ge 2 ]; then _dim "self-heal · rebuilding keyring from scratch"; sudo rm -rf /etc/pacman.d/gnupg
+      if [ "${_HEAL_N:-1}" -ge 2 ]; then
+        _dim "self-heal · rebuilding keyring from scratch"
+        # Release any gpg process holding the keyring dir, otherwise the rm fails
+        # "Device or resource busy" and leaks the raw error into the loader.
+        sudo gpgconf --kill all >>"$LOG" 2>&1 || true
+        local _g; for _g in gpg-agent dirmngr keyboxd scdaemon; do sudo pkill -9 -x "$_g" 2>>"$LOG"; done
+        sudo fuser -k /etc/pacman.d/gnupg >>"$LOG" 2>&1 || true
+        sudo rm -rf /etc/pacman.d/gnupg >>"$LOG" 2>&1
       else _dim "self-heal · repairing keyring + signatures"; fi
       sudo pacman-key --init       >>"$LOG" 2>&1
       sudo pacman-key --populate $pop >>"$LOG" 2>&1
