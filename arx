@@ -152,7 +152,9 @@ _load(){ # label cmd...
 
 # Turn raw pacman/yay log noise into one clean error line.
 _diagnose(){
-  if   grep -qiE 'Resolving timed out|Could not resolve host|name resolution|No address record|failed retrieving file' "$LOG"; then
+  if   grep -qiE 'error downloading sources|==> ERROR: Failure while downloading' "$LOG"; then
+        echo "an AUR package source could not be downloaded (upstream moved or removed it) - the PKGBUILD needs an upstream fix, not a system repair: $(grep -ioE 'error making: [^ ]+' "$LOG" | sed 's/.*: //' | tr '\n' ' ')"
+  elif grep -qiE 'Resolving timed out|Could not resolve host|name resolution|No address record|failed retrieving file' "$LOG"; then
         echo "network unreachable - could not reach the mirrors (check DNS / connection)"
   elif grep -qi 'failed to synchronize all databases' "$LOG"; then
         echo "could not synchronize the repositories"
@@ -178,9 +180,10 @@ _diagnose(){
 
 # Classify the failure in $LOG into a known error class (Arch Wiki: Pacman/Troubleshooting).
 _errkey(){
-  if   grep -qiE 'could not open file [^:]*local/[^:]+/(desc|files|mtree): No such file|database is inconsistent' "$LOG"; then echo dbcorrupt
+  if   grep -qiE 'error downloading sources|==> ERROR: Failure while downloading' "$LOG"; then echo srcfail
+  elif grep -qiE 'could not open file [^:]*local/[^:]+/(desc|files|mtree): No such file|database is inconsistent' "$LOG"; then echo dbcorrupt
   elif grep -qiE 'exists in filesystem|conflicting files'                                   "$LOG"; then echo fileconflict
-  elif grep -qiE 'signature .*(unknown|marginal|never)|unknown trust|PGP signature|could not be looked up|GPGME|invalid or corrupted package \(PGP' "$LOG"; then echo keyring
+  elif grep -qiE 'signature .*(unknown|marginal|never)|unknown trust|could not be looked up|GPGME|invalid or corrupted package \(PGP' "$LOG"; then echo keyring
   elif grep -qiE 'could not lock database|unable to lock'                                   "$LOG"; then echo lock
   elif grep -qiE 'certificate has expired|certificate is not yet valid|SSL certificate|certificate verify failed|SSL_ERROR|TLS connect|gnutls_handshake|unable to get local issuer|failed retrieving file .* from [^ ]+ :' "$LOG"; then echo mirror
   elif grep -qiE 'failed to synchronize all databases|failed retrieving file.*\.db|error.*404|failed to update' "$LOG"; then echo db
@@ -393,7 +396,22 @@ op_update(){
     _quiet "checking for updates" checkupdates
     if grep -qiE 'Resolving timed out|could not resolve|failed retrieving|name resolution' "$LOG"; then _no "$(_diagnose)"; return 1; fi
     list=$(grep -E '^[a-zA-Z0-9]' "$LOG"); n=$(printf '%s' "$list" | grep -c . 2>/dev/null)
-    if [ "${n:-0}" -eq 0 ]; then _ok "system is up to date"; return 0; fi
+    if [ "${n:-0}" -eq 0 ]; then
+      # System repos are current, but AUR-only updates must NOT be skipped —
+      # otherwise they sit forever and the update counter never clears.
+      if command -v yay >/dev/null 2>&1; then
+        local aur an; aur=$(yay -Qua 2>/dev/null); an=$(printf '%s' "$aur" | grep -c . 2>/dev/null)
+        if [ "${an:-0}" -gt 0 ]; then
+          _dim "system current · $an AUR update(s)"
+          printf '%s\n' "$aur" | head -8 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s\n", D, R, $1}'
+          printf "\n"; _confirm || return 0
+          _run "upgrading AUR" yay -Sua --noconfirm; local rc=$?
+          [ $rc -eq 0 ] && _summary "AUR upgraded" "$an" || _no "$(_diagnose)"
+          return $rc
+        fi
+      fi
+      _ok "system is up to date"; return 0
+    fi
     _dim "$n package(s) to upgrade"
     printf '%s\n' "$list" | head -8 | awk -v D="$DM" -v R="$RS" '{printf "    %s+%s %s\n", D, R, $1}'
     [ "$n" -gt 8 ] && _dim "  ...and $((n-8)) more"
@@ -449,6 +467,62 @@ op_upgrade_all(){
   op_update "$@"; local r1=$?
   op_tools;       local r2=$?
   return $(( r1 != 0 || r2 != 0 ))
+}
+
+# ---------------- ARXOS Weapons arsenal (taxonomy-driven) ----------------
+# Reads the ARXOS tool taxonomy (name|MENU|SUB|cat|desc) and turns it into a
+# browsable arsenal: 4 menus (Offensive/Bug Bounty/Defensive/Research) → groups
+# → tools, and one-command install of a whole group.
+ARXOS_TOOLS="${ARXOS_TOOLS:-/usr/share/arxos/tools.db}"
+_wname(){ case "$1" in O) echo "Offensive";; B) echo "Bug Bounty";; D) echo "Defensive";; R) echo "Research";; *) echo "$1";; esac; }
+_wcode(){ case "${1,,}" in o|off|offense|offensive) echo O;; b|bb|bug|bugbounty|bug-bounty) echo B;; d|def|defense|defensive|blue) echo D;; r|res|research) echo R;; *) echo "";; esac; }
+_wrows(){ grep -E '^[A-Za-z0-9._+-]+\|[OBDR]\|[A-Za-z0-9]+\|' "$ARXOS_TOOLS" 2>/dev/null; }   # data rows only
+_WC=$'\033[38;5;45m'; _WD=$'\033[90m'; _WR=$'\033[0m'
+
+op_weapons(){
+  [ -f "$ARXOS_TOOLS" ] || { _no "arsenal taxonomy not found at ${ARXOS_TOOLS}"; _dim "ship it: sudo install -Dm644 ArxOS-tools-categorization.md ${ARXOS_TOOLS}"; return 1; }
+  [ -n "$(_wrows | head -1)" ] || { _no "arsenal taxonomy has no tool rows yet (still being populated)"; return 1; }
+  local cmd="${1:-}"; [ $# -gt 0 ] && shift
+  case "$cmd" in
+    ""|ls|list|menu|menus)
+      _title "weapons arsenal"
+      local m n
+      for m in O B D R; do
+        n=$(_wrows | awk -F'|' -v M="$m" '$2==M' | wc -l | tr -d ' ')
+        printf "  ${GB}%s${RS} ${DM}· %s tools${RS}\n" "$(_wname "$m")" "$n"
+        _wrows | awk -F'|' -v M="$m" '$2==M{print $3}' | sort | uniq -c | sort -rn \
+          | awk -v C="$_WC" -v R="$_WR" -v D="$_WD" '{printf "     %s%-10s%s %s(%s)%s\n", C, tolower($2), R, D, $1, R}'
+        printf "\n"
+      done
+      _dim "a group:  arx weapons <group>    ·    install:  arx weapons install <group>" ;;
+    search|find|s)
+      local q="$*"; [ -z "$q" ] && { _no "usage: arx weapons search <term>"; return 1; }
+      _title "weapons" "search · $q"
+      _wrows | grep -iE -- "$q" \
+        | awk -F'|' -v C="$_WC" -v R="$_WR" -v D="$_WD" '{printf "  %s%-22s%s %s%-9s%s %s%s%s\n", C,$1,R, D,tolower($3),R, D,substr($5,1,48),R}' | head -40 ;;
+    install|in|i|add)
+      local g="${1:-}"; [ -z "$g" ] && { _no "usage: arx weapons install <group>"; return 1; }
+      local list; list=$(_wrows | awk -F'|' -v G="$(printf '%s' "$g" | tr '[:lower:]' '[:upper:]')" 'toupper($3)==G{print $1}' | sort -u)
+      [ -z "$list" ] && { _no "no '$g' group (try: arx weapons)"; return 1; }
+      local cnt; cnt=$(printf '%s\n' "$list" | grep -c .)
+      _dim "$cnt tools in the ${g,,} group"
+      printf '%s\n' "$list" | head -8 | awk -v D="$_WD" -v R="$_WR" '{printf "    %s+%s %s\n", D, R, $1}'
+      [ "$cnt" -gt 8 ] && _dim "  ...and $((cnt-8)) more"
+      printf "\n"; op_install $list ;;
+    *)
+      local mc; mc=$(_wcode "$cmd")
+      if [ -n "$mc" ]; then
+        _title "weapons" "$(_wname "$mc")"
+        _wrows | awk -F'|' -v M="$mc" '$2==M{print $3}' | sort | uniq -c | sort -rn \
+          | awk -v C="$_WC" -v R="$_WR" -v D="$_WD" '{printf "  %s%-12s%s %s(%s tools)%s\n", C, tolower($2), R, D, $1, R}'
+        printf "\n"; _dim "list a group:  arx weapons <group>"; return 0
+      fi
+      local rows; rows=$(_wrows | awk -F'|' -v G="$(printf '%s' "$cmd" | tr '[:lower:]' '[:upper:]')" 'toupper($3)==G')
+      [ -z "$rows" ] && { _no "unknown group '$cmd' (try: arx weapons)"; return 1; }
+      _title "weapons" "${cmd,,}"
+      printf '%s\n' "$rows" | awk -F'|' -v C="$_WC" -v R="$_WR" -v D="$_WD" '{printf "  %s%-22s%s %s%s%s\n", C,$1,R, D,substr($5,1,54),R}'
+      printf "\n"; _dim "install all:  arx weapons install ${cmd,,}" ;;
+  esac
 }
 
 op_install(){
@@ -661,6 +735,7 @@ op_help(){
   printf "  ${DM}packages${RS}\n"
   printf "  ${C}%-22s${RS}%s\n" "update"          "upgrade system + ARXOS tools (unified)"
   printf "  ${C}%-22s${RS}%s\n" "tools"           "sync ARXOS's own tools only"
+  printf "  ${C}%-22s${RS}%s\n" "weapons [grp]"   "browse / install the arsenal (Offensive/BugBounty/Defensive/Research)"
   printf "  ${C}%-22s${RS}%s\n" "install <pkg>"   "install package(s)"
   printf "  ${C}%-22s${RS}%s\n" "remove <pkg>"    "remove package(s) + deps"
   printf "  ${C}%-22s${RS}%s\n" "downgrade <pkg>" "roll a package back"
@@ -696,6 +771,7 @@ case "$verb" in
   system|sys|sysupgrade)        op_update "$@" ;;
   tools|self|selfupdate|self-update) op_tools ;;
   in|install|i|add)             op_install "$@" ;;
+  weapons|arsenal|w)            op_weapons "$@" ;;
   rm|remove|r|del|uninstall)    op_remove "$@" ;;
   se|search|s|find|q)           op_search "$@" ;;
   if|info|show)                 op_info "$@" ;;
