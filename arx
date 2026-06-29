@@ -75,6 +75,7 @@ _bar(){
 # Records size/time/speed into ARX_DLSIZE/ARX_DLTIME/ARX_SPEED for the summary.
 _load(){ # label cmd...
   local label="$1"; shift
+  local cmdq; printf -v cmdq '%q ' "$@"   # shell-quote the final command so the loader's sh -c never re-expands globs (e.g. --overwrite '/path/*')
   ARX_DLSIZE=""; ARX_DLTIME=0; ARX_SPEED=""
   : > "$LOG"
   if [ ! -t 1 ]; then
@@ -83,7 +84,7 @@ _load(){ # label cmd...
     # per state change (downloading X/N · upgrading pkg X/N) instead of thousands
     # of progress-bar frames.
     printf '  >> %s\n' "$label"
-    script -qefc "set -f; $*" "$LOG" >/dev/null 2>&1 & local pid=$!   # set -f: args are final; never glob-expand (e.g. --overwrite '/path/*')
+    script -qefc "$cmdq" "$LOG" >/dev/null 2>&1 & local pid=$!
     local last="" N="" t_dl0=0 t_dl1=0 now=""
     while kill -0 "$pid" 2>/dev/null; do
       local t; t=$(tail -c 6000 "$LOG" 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g')
@@ -109,7 +110,7 @@ _load(){ # label cmd...
     if [ "$t_dl0" -gt 0 ]; then [ "$t_dl1" -eq 0 ] && t_dl1=$(date +%s); ARX_DLTIME=$((t_dl1-t_dl0)); ARX_SPEED=$(_speed "$ARX_DLSIZE" "$ARX_DLTIME"); fi
     return $rc
   fi
-  script -qefc "set -f; $*" "$LOG" >/dev/null 2>&1 & local pid=$!   # set -f: args are final; never glob-expand (e.g. --overwrite '/path/*')
+  script -qefc "$cmdq" "$LOG" >/dev/null 2>&1 & local pid=$!
   printf '\033[?25l'
   local i=0 N="" t_dl0=0 t_dl1=0
   while kill -0 "$pid" 2>/dev/null; do
