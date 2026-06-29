@@ -1,5 +1,4 @@
-# toolsreportinfo.md — BlackArch Linux Complete Tool Reference
-# Generated from: https://www.blackarch.org/tools.html
+# toolsreportinfo.md — ARXOS Arsenal Tool Reference
 # Total tools: 2867
 #
 # ═══════════════════════════════════════════════════════════════
@@ -61,7 +60,7 @@
 #   WIRE     = Wireless
 #   WL       = Wordlists
 #
-# BA_CAT → Original BlackArch category (without "blackarch-" prefix)
+# BA_CAT → Original arsenal category (without "blackarch-" prefix)
 #
 # MENU COUNTS:
 #   OFFENSIVE: 824 tools
@@ -2786,7 +2785,6 @@ avml|R|MISC|misc|A portable volatile memory acquisition tool for Linux.
 azurehound|R|MISC|misc|Azure data exporter for BloodHound.
 base64dump|R|MISC|misc|Extract and decode base64 strings from files.
 bettercap-ui|R|MISC|misc|Official Bettercap's Web UI.
-blackarch-officials|R|MISC||Meta package for installing official security tools from the Arch L…
 bless|R|MISC|misc|High-quality, full-featured hex editor.
 bloodhound-cli|R|MISC|misc|Command-line interface for BloodHound v5.
 bqm|R|MISC|misc|Download BloudHound query lists, deduplicate entries and merge them…

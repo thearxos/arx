@@ -527,9 +527,16 @@ op_weapons(){
 
 op_install(){
   [ $# -eq 0 ] && { _title "install"; _no "no package specified"; return 1; }
-  # ARXOS arsenal aliases: weaponCat-<x> maps to its underlying tool group
+  # ARXOS arsenal: "arx install weaponsCat <category|all>" installs a whole
+  # BlackArch arsenal group in real time (all = the entire arsenal).
+  if printf '%s' "${1:-}" | grep -qiE '^weapons?cat([-=].+)?$'; then
+    local _wc="$1"; shift
+    case "$_wc" in *[-=]*) set -- "${_wc#*[-=]}" "$@";; esac
+    op_weaponscat "$@"; return $?
+  fi
+  # inline alias: a weaponsCat-<x> / weaponCat-<x> token → blackarch-<x>
   local _t=() _a; for _a in "$@"; do
-    [[ "$_a" == weaponCat-* ]] && _t+=("blackarch-${_a#weaponCat-}") || _t+=("$_a"); done
+    case "$_a" in weapons[Cc]at-*|weapon[Cc]at-*) _t+=("blackarch-${_a#*at-}");; *) _t+=("$_a");; esac; done
   set -- "${_t[@]}"
   _title "install" "$*"
   if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then
@@ -548,6 +555,36 @@ op_install(){
   _run "installing" sudo pacman -S --noconfirm "$@"
   local rc=$?
   [ $rc -eq 0 ] && _summary "installed" "${n:-0}" || _no "$(_diagnose)"
+  return $rc
+}
+
+_wcats(){ pacman -Sg 2>/dev/null | awk '$1 ~ /^blackarch-/{print substr($1,11)}' | sort -u; }
+op_weaponscat(){
+  local cat="${1:-}"
+  if [ -z "$cat" ]; then
+    _title "install" "weaponsCat"
+    _no "usage: arx install weaponsCat <category|all>"
+    local cats; cats=$(_wcats | paste -sd' ' -)
+    [ -n "$cats" ] && { _dim "arsenal categories:"; printf "    %s\n\n" "$cats"; }
+    _dim "everything at once:  arx install weaponsCat all"
+    return 1
+  fi
+  # grp is the internal pacman group; it is NEVER surfaced to the user (OPSEC:
+  # ARXOS must not read as a customized arsenal-distro). Only the category shows.
+  local grp lbl; if [ "${cat,,}" = all ]; then grp=blackarch; lbl="full ARXOS arsenal"; else grp="blackarch-${cat,,}"; lbl="${cat,,} arsenal"; fi
+  local n; n=$(pacman -Sg "$grp" 2>/dev/null | wc -l | tr -d ' ')
+  _title "install" "weaponsCat · ${cat,,}"
+  if [ "${n:-0}" -eq 0 ]; then
+    _no "no arsenal category '$cat'"
+    _dim "list categories:  arx install weaponsCat"
+    return 1
+  fi
+  [ "${cat,,}" = all ] && _dim "the $lbl · $n tools · this is large (tens of GB)" \
+                       || _dim "$n tools in the ${cat,,} arsenal · real-time install"
+  _auth; _confirm || return 0
+  _run "installing the $lbl ($n tools)" sudo pacman -S --needed --noconfirm "$grp"
+  local rc=$?
+  [ $rc -eq 0 ] && _summary "installed" "$n" || _no "$(_diagnose)"
   return $rc
 }
 
