@@ -397,6 +397,43 @@ _confirm(){ # prompt-noun
 
 _auth(){ sudo -n true 2>/dev/null && return 0; sudo -v 2>/dev/null && return 0; _no "sudo authentication required"; exit 1; }
 
+_ensure_yay(){
+  command -v yay >/dev/null 2>&1 && return 0
+  _title "AUR helper"
+  _dim "yay is not installed - bootstrapping it so AUR installs can continue"
+  _auth
+  _quiet "installing build dependencies" sudo pacman -S --needed --noconfirm base-devel git
+  if [ $? -ne 0 ]; then _no "$(_diagnose)"; return 1; fi
+  local build="${XDG_CACHE_HOME:-$HOME/.cache}/arxos/aur/yay"
+  mkdir -p "$(dirname "$build")"
+  if [ -d "$build/.git" ]; then
+    _load "syncing yay PKGBUILD" git -C "$build" pull --ff-only
+  else
+    _load "fetching yay PKGBUILD" git clone --depth=1 https://aur.archlinux.org/yay.git "$build"
+  fi
+  if [ $? -ne 0 ]; then _no "could not fetch yay from the AUR"; return 1; fi
+  _load "building yay" bash -lc "cd '$build' && makepkg -si --noconfirm"
+  local rc=$?
+  [ $rc -eq 0 ] && _ok "yay installed" || _no "$(_diagnose)"
+  return $rc
+}
+
+op_pip(){
+  local py=python3
+  if [ "${1:-}" = "--python" ]; then py="${2:-python3}"; shift 2; fi
+  if [ "${1:-}" = "install" ]; then
+    shift
+    [ $# -eq 0 ] && { _title "pip"; _no "no package specified"; return 1; }
+    _title "pip install" "$*"
+    _confirm || return 0
+    _load "installing Python package(s)" "$py" -m pip install --break-system-packages "$@"
+    local rc=$?
+    [ $rc -eq 0 ] && _ok "Python package(s) installed" || _no "$(_diagnose)"
+    return $rc
+  fi
+  command "$py" -m pip "$@"
+}
+
 # ---------------- operations ----------------
 op_update(){
   _title "system upgrade"
@@ -550,8 +587,9 @@ op_install(){
   set -- "${_t[@]}"
   _title "install" "$*"
   if ! pacman -Sp --print-format '%n %v' "$@" >"$LOG" 2>&1; then
-    if command -v yay >/dev/null 2>&1 && grep -qi 'target not found' "$LOG"; then
+    if grep -qi 'target not found' "$LOG"; then
       _dim "not in the repositories - building from the AUR"; printf "\n"
+      _ensure_yay || return 1
       _aur_safety "$@" || return 1
       _auth; _confirm || return 0
       _run "building from AUR" yay -S --noconfirm "$@"; local rc=$?
@@ -688,7 +726,7 @@ op_orphans(){
 
 op_aur(){
   [ $# -eq 0 ] && { _title "AUR"; _no "no package specified"; return 1; }
-  command -v yay >/dev/null 2>&1 || { _title "AUR"; _no "yay is not installed"; return 1; }
+  _ensure_yay || return 1
   _title "AUR install" "$*"
   _aur_safety "$@" || return 1
   _run "building" yay -S --noconfirm "$@"
@@ -777,6 +815,26 @@ op_files(){
   printf "\n"
 }
 
+op_outdated(){
+  _title "available updates"
+  local repo aur nr=0 na=0
+  repo=$(checkupdates 2>/dev/null); nr=$(printf '%s' "$repo" | grep -c .)
+  [ "$nr" -gt 0 ] && { printf "  ${DM}repositories (%d)${RS}\n" "$nr"; printf '%s\n' "$repo" | awk -v C="$C" -v R="$RS" '{printf "    %s%s%s\n",C,$0,R}' | head -50; }
+  if command -v yay >/dev/null 2>&1; then
+    aur=$(yay -Qua 2>/dev/null); na=$(printf '%s' "$aur" | grep -c .)
+    [ "$na" -gt 0 ] && { printf "\n  ${DM}AUR (%d)${RS}\n" "$na"; printf '%s\n' "$aur" | awk -v C="$C" -v R="$RS" '{printf "    %s%s%s\n",C,$0,R}'; }
+  fi
+  local n=$((nr+na)); printf "\n"
+  [ "$n" -eq 0 ] && _ok "system is up to date" || printf "  ${GR}>>${RS} %d update(s) available - run ${C}arx update${RS}\n\n" "$n"
+}
+
+op_provides(){
+  [ $# -eq 0 ] && { _title "provides"; _no "no file specified"; return 1; }
+  _title "provides" "$*"
+  pacman -F "$@" >/dev/null 2>&1 || { _auth; _quiet "syncing file database" sudo pacman -Fy; }
+  pacman -F "$@" 2>&1 | sed 's/^/  /'; printf "\n"
+}
+
 op_help(){
   printf "\n  ${GB}arx${RS} ${DM}- ARXOS package manager${RS}\n\n"
   printf "  ${DM}packages${RS}\n"
@@ -787,12 +845,15 @@ op_help(){
   printf "  ${C}%-22s${RS}%s\n" "remove <pkg>"    "remove package(s) + deps"
   printf "  ${C}%-22s${RS}%s\n" "downgrade <pkg>" "roll a package back"
   printf "  ${C}%-22s${RS}%s\n" "aur <pkg>"       "install from the AUR"
+  printf "  ${C}%-22s${RS}%s\n" "pip install <pkg>" "install Python packages with system-package override"
   printf "\n  ${DM}query${RS}\n"
   printf "  ${C}%-22s${RS}%s\n" "search <term>"   "search repositories"
   printf "  ${C}%-22s${RS}%s\n" "info <pkg>"      "package details"
   printf "  ${C}%-22s${RS}%s\n" "list [filter]"   "installed packages"
   printf "  ${C}%-22s${RS}%s\n" "owns <file>"     "which package owns a file"
   printf "  ${C}%-22s${RS}%s\n" "files <pkg>"     "list a package's files"
+  printf "  ${C}%-22s${RS}%s\n" "outdated"        "list available updates (no install)"
+  printf "  ${C}%-22s${RS}%s\n" "provides <file>" "which repo package provides a file"
   printf "\n  ${DM}maintenance${RS}\n"
   printf "  ${C}%-22s${RS}%s\n" "mirrors"         "rank the fastest mirrors"
   printf "  ${C}%-22s${RS}%s\n" "keys"            "repair keyring / signatures"
@@ -825,6 +886,7 @@ case "$verb" in
   cl|clean|cc)                  op_clean ;;
   orphans|autoremove|sweep)     op_orphans ;;
   aur)                          op_aur "$@" ;;
+  pip|pip3)                     op_pip "$@" ;;
   mirrors|mirror|rank)          op_mirrors ;;
   keys|keyring|key)             op_keys ;;
   fix|repair|doctor)            op_fix ;;
@@ -832,6 +894,8 @@ case "$verb" in
   list|ls|installed)            op_list "$@" ;;
   owns|owner|whoowns)           op_owns "$@" ;;
   files|filelist|fl)            op_files "$@" ;;
+  outdated|updates|checkupdates) op_outdated ;;
+  provides|whatprovides|prov)   op_provides "$@" ;;
   ""|-h|--help|help)            op_help ;;
   *)                            op_install "$verb" "$@" ;;
 esac
