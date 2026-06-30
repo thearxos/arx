@@ -84,7 +84,7 @@ _load(){ # label cmd...
     # per state change (downloading X/N · upgrading pkg X/N) instead of thousands
     # of progress-bar frames.
     printf '  >> %s\n' "$label"
-    script -qefc "$cmdq" "$LOG" >/dev/null 2>&1 & local pid=$!
+    script -qefc "$cmdq" "$LOG" </dev/null >/dev/null 2>&1 & local pid=$!
     local last="" N="" t_dl0=0 t_dl1=0 now=""
     while kill -0 "$pid" 2>/dev/null; do
       local t; t=$(tail -c 6000 "$LOG" 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g')
@@ -110,7 +110,7 @@ _load(){ # label cmd...
     if [ "$t_dl0" -gt 0 ]; then [ "$t_dl1" -eq 0 ] && t_dl1=$(date +%s); ARX_DLTIME=$((t_dl1-t_dl0)); ARX_SPEED=$(_speed "$ARX_DLSIZE" "$ARX_DLTIME"); fi
     return $rc
   fi
-  script -qefc "$cmdq" "$LOG" >/dev/null 2>&1 & local pid=$!
+  script -qefc "$cmdq" "$LOG" </dev/null >/dev/null 2>&1 & local pid=$!
   printf '\033[?25l'
   local i=0 N="" t_dl0=0 t_dl1=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -501,17 +501,17 @@ op_tools(){
     branch="${branch:-main}"; type="${type:-tool}"; dir="$cache/$name"; fresh=0
     if [ -d "$dir/.git" ]; then
       before=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
-      if ! _load "$name · syncing" "git -C '$dir' fetch -q --depth=1 origin '$branch' && git -C '$dir' reset -q --hard 'origin/$branch'"; then
+      if ! _load "$name · syncing" bash -c "git -C '$dir' fetch -q --depth=1 origin '$branch' && git -C '$dir' reset -q --hard 'origin/$branch'"; then
         printf "  ${RD}xx${RS} %-22s ${RD}sync failed${RS}\n" "$name"; err=$((err+1)); continue; fi
       after=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
       if [ "$before" = "$after" ]; then printf "  ${DM}..${RS} %-22s ${DM}up to date${RS}\n" "$name"; same=$((same+1)); continue; fi
     else
-      if ! _load "$name · cloning" "git clone -q --depth=1 -b '$branch' '$url' '$dir'"; then
+      if ! _load "$name · cloning" git clone -q --depth=1 -b "$branch" "$url" "$dir"; then
         printf "  ${RD}xx${RS} %-22s ${RD}clone failed${RS}\n" "$name"; err=$((err+1)); continue; fi
       fresh=1
     fi
     if [ -f "$dir/install.sh" ]; then
-      if ! _load "$name · installing" "cd '$dir' && bash install.sh"; then
+      if ! _load "$name · installing" bash -c "cd '$dir' && bash install.sh"; then
         printf "  ${RD}xx${RS} %-22s ${RD}install failed${RS}\n" "$name"; err=$((err+1)); continue; fi
     fi
     local tag=""; [ "$type" != tool ] && tag=" ${DM}($type)${RS}"
