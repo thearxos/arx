@@ -481,12 +481,24 @@ op_update(){
 op_tools(){
   _title "ARXOS tools"
   local manifest="${ARXOS_MANIFEST:-/etc/arxos/repos.list}"
-  if [ ! -f "$manifest" ]; then _dim "no tool manifest ($manifest) — nothing to sync"; printf "\n"; return 0; fi
+  local manifest_url="${ARXOS_MANIFEST_URL:-https://raw.githubusercontent.com/thearxos/arxupd/main/repos.list}"
   local cache="${XDG_CACHE_HOME:-$HOME/.cache}/arxos/repos"; mkdir -p "$cache"
-  local up=0 new=0 same=0 err=0 name url branch dir before after fresh
-  while read -r name url branch _; do
+  # Self-updating registry: fetch the canonical manifest first, so any ARXOS repo
+  # added upstream (a new tool, the kernel, a core component) reaches every install
+  # on the next `arx update`. Each line is the "alias" the updater + Control Center read.
+  if command -v curl >/dev/null 2>&1; then
+    local tmp="$cache/.repos.list.new"
+    if curl -fsSL --max-time 12 "$manifest_url" -o "$tmp" 2>/dev/null && grep -qE '^[a-z0-9]' "$tmp"; then
+      if ! cmp -s "$tmp" "$manifest" 2>/dev/null; then
+        sudo cp -f "$tmp" "$manifest" 2>/dev/null && _dim "registry refreshed · $(grep -cE '^[a-z0-9]' "$tmp") component(s)"
+      fi
+    fi
+  fi
+  if [ ! -f "$manifest" ]; then _dim "no tool manifest ($manifest) — nothing to sync"; printf "\n"; return 0; fi
+  local up=0 new=0 same=0 err=0 name url branch type dir before after fresh
+  while read -r name url branch type _; do
     [[ -z "$name" || "$name" == \#* ]] && continue
-    branch="${branch:-main}"; dir="$cache/$name"; fresh=0
+    branch="${branch:-main}"; type="${type:-tool}"; dir="$cache/$name"; fresh=0
     if [ -d "$dir/.git" ]; then
       before=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
       if ! _load "$name · syncing" "git -C '$dir' fetch -q --depth=1 origin '$branch' && git -C '$dir' reset -q --hard 'origin/$branch'"; then
@@ -502,8 +514,9 @@ op_tools(){
       if ! _load "$name · installing" "cd '$dir' && bash install.sh"; then
         printf "  ${RD}xx${RS} %-22s ${RD}install failed${RS}\n" "$name"; err=$((err+1)); continue; fi
     fi
-    if [ "$fresh" = 1 ]; then printf "  ${GR}>>${RS} %-22s ${GR}installed${RS}\n" "$name"; new=$((new+1))
-    else printf "  ${GR}>>${RS} %-22s ${GR}updated${RS}\n" "$name"; up=$((up+1)); fi
+    local tag=""; [ "$type" != tool ] && tag=" ${DM}($type)${RS}"
+    if [ "$fresh" = 1 ]; then printf "  ${GR}>>${RS} %-22s ${GR}installed${RS}%s\n" "$name" "$tag"; new=$((new+1))
+    else printf "  ${GR}>>${RS} %-22s ${GR}updated${RS}%s\n" "$name" "$tag"; up=$((up+1)); fi
   done < "$manifest"
   printf "\n     ${DM}%s updated · %s installed · %s current · %s failed${RS}\n\n" "$up" "$new" "$same" "$err"
   [ "$err" -eq 0 ]
