@@ -15,7 +15,7 @@
 #   flags: -y/--yes assume yes   |   arx <pkg> installs directly
 
 set -o pipefail
-: "${TERM:=xterm-256color}"; export TERM   # quiet tput when launched without a terminal (GUI)
+case ${TERM:-} in ""|unknown|dumb|network) TERM=xterm-256color ;; esac; export TERM   # GUI launch can hand us an empty/invalid TERM ("unknown"); keep tput quiet
 case "${1:-}" in --version|-V) echo "arx 0.0.1 (ARXOS)"; exit 0 ;; esac
 
 GB=$'\033[1;38;5;220m'; CB=$'\033[1;38;5;45m'; C=$'\033[38;5;45m'
